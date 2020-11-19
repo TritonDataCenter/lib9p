@@ -23,6 +23,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
+ * Copyright 2020 Joyent, Inc.
  */
 
 #include <stdlib.h>
@@ -34,11 +35,16 @@
 #include <sys/types.h>
 #ifdef __APPLE__
 # include "../apple_endian.h"
+#elif __sun__
+# include <port.h>
+# include "../illumos_endian.h"
 #else
 # include <sys/endian.h>
 #endif
 #include <sys/socket.h>
-#include <sys/event.h>
+#ifndef __sun
+# include <sys/event.h>
+#endif
 #include <sys/uio.h>
 #include <netdb.h>
 #include "../lib9p.h"
@@ -70,10 +76,17 @@ int
 l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 {
 	struct addrinfo *res, *res0, hints;
-	struct kevent kev[2];
-	struct kevent event[2];
-	int err, kq, i, val, evs, nsockets = 0;
-	int sockets[2];
+#ifdef __sun
+	port_event_t *pe = NULL;
+	int evport;
+#else
+	struct kevent *kev = NULL;
+	struct kevent *event = NULL;
+	int kq, evs;
+#endif
+	int err, i, val;
+	int n, nsockets = 0;
+	int *sockets = NULL;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
@@ -83,7 +96,50 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 	if (err)
 		return (-1);
 
-	for (res = res0; res; res = res->ai_next) {
+	for (res = res0; res != NULL; res = res->ai_next)
+		nsockets++;
+
+	if (nsockets == 0)
+		return (-1);
+
+	sockets = calloc(nsockets, sizeof (int));
+	if (sockets == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		return (-1);
+	}
+
+	for (i = 0; i < nsockets; i++)
+		sockets[i] = -1;
+
+#ifdef __sun
+	pev = calloc(nsockets, sizeof (port_event_t));
+	if (pev == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		goto fail;
+	}
+
+	evport = port_create();
+	if (evport == -1) {
+		L9P_LOG(L9P_ERROR, "port_create(): %s", strerror(errno));
+		goto fail;
+	}
+#else
+	kev = calloc(nsockets, sizeof (struct kevent));
+	if (kev == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		goto fail;
+	}
+
+	event = calloc(nsockets, sizeof (struct kevent));
+	if (event == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		goto fail;
+	}
+
+	kq = kqueue();
+#endif
+
+	for (i = 0, res = res0; res; res = res->ai_next) {
 		int s = socket(res->ai_family, res->ai_socktype,
 		    res->ai_protocol);
 
@@ -98,18 +154,30 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 			continue;
 		}
 
-		sockets[nsockets] = s;
-		EV_SET(&kev[nsockets++], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0,
+		sockets[i] = s;
+#ifdef __sun
+
+		if (port_associate(evport, PORT_SOURCE_FD, s, POLLIN|POLLHUP,
+		    NULL) < 0) {
+			L9P_LOG(L9P_ERROR, "port_associate(%d): %s", s,
+			    strerror(errno));
+			goto fail;
+		}
+#else
+		EV_SET(&kev[i++], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0,
 		    0, 0);
+#endif
 		listen(s, 10);
 	}
 
-	if (nsockets < 1) {
+	if (i < 1) {
 		L9P_LOG(L9P_ERROR, "bind(): %s", strerror(errno));
+
 		return(-1);
 	}
 
-	kq = kqueue();
+	/* set nsockets to the actual number bound */
+	nsockets = i;
 
 	if (kevent(kq, kev, nsockets, NULL, 0, NULL) < 0) {
 		L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
@@ -143,6 +211,28 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 		}
 	}
 
+	return (0);
+
+fail:
+	if (sockets != NULL) {
+		for (i = 0; i < nsockets; i++) {
+			if (sockets[i] >= 0)
+				(void) close(sockets[i]);
+		}
+		free(sockets);
+	}
+
+#ifdef __sun
+	if (evport >= 0)
+		close(evport);
+
+	free(pe);
+#else
+	free(kev);
+	free(event);
+#endif
+
+	return (-1)
 }
 
 void

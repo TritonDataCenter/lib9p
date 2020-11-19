@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/uio.h>

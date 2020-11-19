@@ -38,9 +38,11 @@
 #include "fid.h"
 #include "log.h"
 
+#ifndef __sun__
 typedef int econvertfn(acl_entry_t, struct l9p_ace *);
+#endif
 
-#ifndef __APPLE__
+#ifdef __FreeBSD__
 static struct l9p_acl *l9p_new_acl(uint32_t acetype, uint32_t aceasize);
 static struct l9p_acl *l9p_growacl(struct l9p_acl *acl, uint32_t aceasize);
 static int l9p_count_aces(acl_t sysacl);
@@ -453,7 +455,7 @@ l9p_ace_mask_to_rwx(int32_t opmask)
 	return (rwx);
 }
 
-#ifndef __APPLE__
+#ifdef __FreeBSD__
 /*
  * Allocate new ACL holder and ACEs.
  */
@@ -716,5 +718,13 @@ l9p_freebsd_nfsv4acl_to_acl(acl_t sysacl)
 struct l9p_acl *
 l9p_darwin_nfsv4acl_to_acl(acl_t sysacl)
 {
+}
+#endif
+
+#if defined(HAVE_ILLUMOS_ACLS)
+struct l9p_acl *
+l9p_illumos_nfsv4acl_to_acl(ace_t sysacl)
+{
+	return (NULL);
 }
 #endif

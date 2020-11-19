@@ -2,13 +2,11 @@
 # and set env variable LIB9P_LOGGING to stderr or to
 # the (preferably full path name of) the debug log file.
 
-SRC=/ws/smartos-live/projects/illumos/usr/src
 LIB=		9p
 SHLIB_MAJOR=	1
 SRCS=		pack.c \
 		connection.c \
-		request.c \
-		log.c \
+		request.c log.c \
 		hashtable.c \
 		genacl.c \
 		utils.c \
@@ -17,14 +15,13 @@ SRCS=		pack.c \
 		transport/socket.c \
 		backend/fs.c
 
-OBJS = $(SRCS:%.c=%.o)
-CPPFLAGS = -I$(SRC)/compat/freebsd
-CFLAGS = -g -DL9P_DEBUG
+INCS=		lib9p.h
+CC=		clang
+CFLAGS=		-g -O0 -DL9P_DEBUG=L9P_DEBUG -DWITH_CASPER
+LIBADD=		sbuf libcasper libcap_pwd libcap_grp
+SUBDIR=		example
 
-%.o: %.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+cscope: .PHONY
+	cd ${.CURDIR}; cscope -buq $$(find . -name '*.[ch]' -print)
 
-lib9p.so: $(OBJS)
-
-clean:
-	-rm -f $(OBJS)
+.include <bsd.lib.mk>

@@ -3,6 +3,7 @@
 # the (preferably full path name of) the debug log file.
 
 SRC=/ws/smartos-live/projects/illumos/usr/src
+
 LIB=		9p
 SHLIB_MAJOR=	1
 SRCS=		pack.c \
@@ -18,12 +19,16 @@ SRCS=		pack.c \
 		backend/fs.c
 
 OBJS = $(SRCS:%.c=%.o)
-CFLAGS += -g -DL9P_DEBUG
+CFLAGS += -m64 -g -DL9P_DEBUG=L9P_DEBUG -gdwarf-2 -fpic
+CPPFLAGS += -D_POSIX_PTHREAD_SEMANTICS -D__EXTENSIONS__
+
+LDLIBS += -lsec
 
 %.o: %.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-lib9p.so: $(OBJS)
+lib9p.so.1: $(OBJS)
+	$(CC) -o lib9p.so.1 -shared -Wl,-Bdirect -hlib9p.so.1 $(OBJS)
 
 clean:
-	-rm -f $(OBJS)
+	-rm -f $(OBJS) lib9p.so

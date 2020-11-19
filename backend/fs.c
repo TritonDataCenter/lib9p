@@ -80,6 +80,12 @@
   #define ACL_TYPE_NFS4 ACL_TYPE_EXTENDED
 #endif
 
+#if defined (__sun)
+  #include <sys/sysmacros.h>
+  #include <sys/statvfs.h>
+  #include <sys/un.h>
+#endif
+
 struct fs_softc {
 	int 	fs_rootfd;
 	bool	fs_readonly;
@@ -165,7 +171,11 @@ static int fs_nde(struct fs_softc *, struct l9p_fid *, bool, gid_t,
 static struct fs_fid *open_fid(int, const char *, struct fs_authinfo *, bool);
 static void dostat(struct fs_softc *, struct l9p_stat *, char *,
     struct stat *, bool dotu);
+#ifdef __sun
+static void dostatfs(struct l9p_statfs *, struct statvfs *, long);
+#else
 static void dostatfs(struct l9p_statfs *, struct statfs *, long);
+#endif
 static void fillacl(struct fs_fid *ff);
 static struct l9p_acl *getacl(struct fs_fid *ff, int fd, const char *path);
 static void dropacl(struct fs_fid *ff);
@@ -674,7 +684,13 @@ dostat(struct fs_softc *sc, struct l9p_stat *s, char *name,
 	}
 }
 
-static void dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
+#ifdef __sun
+static void
+dostatfs(struct l9p_statfs *out, struct statvfs *in, long namelen)
+#else
+static void
+dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
+#endif
 {
 
 	out->type = L9P_FSTYPE;
@@ -685,8 +701,12 @@ static void dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
 	out->files = in->f_files;
 	out->ffree = in->f_ffree;
 	out->namelen = (uint32_t)namelen;
+#ifdef __sun
+	out->fsid = in->f_fsid;
+#else
 	out->fsid = ((uint64_t)in->f_fsid.val[0] << 32) |
 	    (uint64_t)in->f_fsid.val[1];
+#endif
 }
 
 static void
@@ -760,7 +780,11 @@ static struct l9p_acl *
 look_for_nfsv4_acl(struct fs_fid *ff, int fd, const char *path)
 {
 	struct l9p_acl *acl;
+#ifdef __sun
+	acl_t *sysacl;
+#else
 	acl_t sysacl;
+#endif
 	int doclose = 0;
 
 	if (fd < 0) {
@@ -788,7 +812,6 @@ look_for_nfsv4_acl(struct fs_fid *ff, int fd, const char *path)
 	}
 #if defined(HAVE_FREEBSD_ACLS)
 	acl = l9p_freebsd_nfsv4acl_to_acl(sysacl);
-#else
 	acl = NULL; /* XXX need a l9p_darwin_acl_to_acl */
 #endif
 	acl_free(sysacl);
@@ -2126,7 +2149,11 @@ fs_statfs(void *softc __unused, struct l9p_request *req)
 {
 	struct fs_fid *file;
 	struct stat st;
+#ifdef __sun
+	struct statvfs f;
+#else
 	struct statfs f;
+#endif
 	long name_max;
 	int error;
 	int fd;
@@ -2152,8 +2179,13 @@ fs_statfs(void *softc __unused, struct l9p_request *req)
 	if (fd < 0)
 		return (errno);
 
+#ifdef __sun
+	if (fstatvfs(fd, &f) != 0)
+		return (errno);
+#else
 	if (fstatfs(fd, &f) != 0)
 		return (errno);
+#endif
 
 	name_max = fpathconf(fd, _PC_NAME_MAX);
 	error = errno;
@@ -2450,6 +2482,29 @@ fs_getattr(void *softc __unused, struct l9p_request *req)
 		req->lr_resp.rgetattr.rdev = (uint64_t)st.st_rdev;
 		valid |= L9PL_GETATTR_RDEV;
 	}
+#ifdef __sun
+	if (mask & L9PL_GETATTR_ATIME) {
+		req->lr_resp.rgetattr.atime_sec =
+		    (uint64_t)st.st_atim.tv_sec;
+		req->lr_resp.rgetattr.atime_nsec =
+		    (uint64_t)st.st_atim.tv_nsec;
+		valid |= L9PL_GETATTR_ATIME;
+	}
+	if (mask & L9PL_GETATTR_MTIME) {
+		req->lr_resp.rgetattr.mtime_sec =
+		    (uint64_t)st.st_mtim.tv_sec;
+		req->lr_resp.rgetattr.mtime_nsec =
+		    (uint64_t)st.st_mtim.tv_nsec;
+		valid |= L9PL_GETATTR_MTIME;
+	}
+	if (mask & L9PL_GETATTR_CTIME) {
+		req->lr_resp.rgetattr.ctime_sec =
+		    (uint64_t)st.st_ctim.tv_sec;
+		req->lr_resp.rgetattr.ctime_nsec =
+		    (uint64_t)st.st_ctim.tv_nsec;
+		valid |= L9PL_GETATTR_CTIME;
+	}
+#else
 	if (mask & L9PL_GETATTR_ATIME) {
 		req->lr_resp.rgetattr.atime_sec =
 		    (uint64_t)st.st_atimespec.tv_sec;
@@ -2471,6 +2526,7 @@ fs_getattr(void *softc __unused, struct l9p_request *req)
 		    (uint64_t)st.st_ctimespec.tv_nsec;
 		valid |= L9PL_GETATTR_CTIME;
 	}
+#endif
 	if (mask & L9PL_GETATTR_BTIME) {
 #if defined(HAVE_BIRTHTIME)
 		req->lr_resp.rgetattr.btime_sec =
@@ -2578,10 +2634,17 @@ fs_setattr(void *softc, struct l9p_request *req)
 	}
 
 	if (mask & (L9PL_SETATTR_ATIME | L9PL_SETATTR_MTIME)) {
+#ifdef __sun
+		ts[0].tv_sec = st.st_atim.tv_sec;
+		ts[0].tv_nsec = st.st_atim.tv_nsec;
+		ts[1].tv_sec = st.st_mtim.tv_sec;
+		ts[1].tv_nsec = st.st_mtim.tv_nsec;
+#else
 		ts[0].tv_sec = st.st_atimespec.tv_sec;
 		ts[0].tv_nsec = st.st_atimespec.tv_nsec;
 		ts[1].tv_sec = st.st_mtimespec.tv_sec;
 		ts[1].tv_nsec = st.st_mtimespec.tv_nsec;
+#endif
 
 		if (mask & L9PL_SETATTR_ATIME) {
 			if (mask & L9PL_SETATTR_ATIME_SET) {
@@ -2686,7 +2749,11 @@ fs_readdir(void *softc __unused, struct l9p_request *req)
 		de.qid.type = 0;
 		generate_qid(&st, &de.qid);
 		de.offset = (uint64_t)telldir(file->ff_dir);
+#ifdef __sun
+		de.type = st.st_mode & S_IFMT;
+#else
 		de.type = dp->d_type;
+#endif
 		de.name = dp->d_name;
 
 		/* Update count only if we completely pack the dirent. */
@@ -3052,6 +3119,8 @@ l9p_backend_fs_init(struct l9p_backend **backendp, int rootfd, bool ro)
 	cap_setpassent(sc->fs_cappwd, 1);
 	cap_setgroupent(sc->fs_capgrp, 1);
 	cap_close(capcas);
+#elif __sun
+	setpwent();
 #else
 	setpassent(1);
 #endif
