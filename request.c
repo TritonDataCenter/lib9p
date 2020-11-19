@@ -31,6 +31,9 @@
 #include <errno.h>
 #include <sys/param.h>
 #include <sys/uio.h>
+#if defined(__sun)
+#include <sys/sysmacros.h>
+#endif
 #if defined(__FreeBSD__)
 #include <sys/sbuf.h>
 #else
@@ -293,7 +296,9 @@ e2linux(int errnum)
 		[EHOSTDOWN] = LINUX_EHOSTDOWN,
 		[EHOSTUNREACH] = LINUX_EHOSTUNREACH,
 		[ENOTEMPTY] = LINUX_ENOTEMPTY,
+#if !defined(__sun)
 		[EPROCLIM] = LINUX_EAGAIN,
+#endif
 		[EUSERS] = LINUX_EUSERS,
 		[EDQUOT] = LINUX_EDQUOT,
 		[ESTALE] = LINUX_ESTALE,
