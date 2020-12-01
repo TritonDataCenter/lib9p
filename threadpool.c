@@ -2,6 +2,8 @@
  * Copyright 2016 Jakub Klama <jceel@FreeBSD.org>
  * All rights reserved
  *
+ * Copyright 2020 Joyent, Inc.
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted providing that the following conditions
  * are met:
@@ -202,6 +204,16 @@ l9p_threadpool_init(struct l9p_threadpool *tp, int size)
 		} else {
 			sprintf(threadname, "9p-worker:%d", i - 1);
 			pthread_set_name_np(worker->ltw_thread, threadname);
+		}
+#elif defined(__sun)
+		if (worker->ltw_responder) {
+			pthread_setname_np(worker->ltw_thread, "9p-responder");
+		} else {
+			char threadname[PTHREAD_MAX_NAMELEN_NP];
+
+			(void)snprintf(threadname, sizeof (threadname),
+			    "9p-worker:%d", i - 1);
+			pthread_setname_np(worker->ltw_thread, threadname);
 		}
 #endif
 

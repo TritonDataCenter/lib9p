@@ -79,13 +79,14 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 #ifdef __sun
 	port_event_t *pe = NULL;
 	int evport;
+	uint_t evs;
 #else
 	struct kevent *kev = NULL;
 	struct kevent *event = NULL;
 	int kq, evs;
 #endif
 	int err, i, val;
-	int n, nsockets = 0;
+	int nsockets = 0;
 	int *sockets = NULL;
 
 	memset(&hints, 0, sizeof(hints));
@@ -179,12 +180,15 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 	/* set nsockets to the actual number bound */
 	nsockets = i;
 
+#ifdef __FreeBSD__
 	if (kevent(kq, kev, nsockets, NULL, 0, NULL) < 0) {
 		L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
 		return (-1);
 	}
+#endif
 
 	for (;;) {
+#ifdef __FreeBSD__
 		evs = kevent(kq, NULL, 0, event, nsockets, NULL);
 		if (evs < 0) {
 			if (errno == EINTR)
@@ -193,12 +197,32 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 			L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
 			return (-1);
 		}
+#elif defined(__sun)
+		evs = 1;
+		if (port_getn(evport, pe, nsockets, &evs, NULL) < 0) {
+			if (errno == EINTR)
+				continue;
+
+			L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
+			return (-1);
+		}
+#endif
 
 		for (i = 0; i < evs; i++) {
 			struct sockaddr client_addr;
 			socklen_t client_addr_len = sizeof(client_addr);
-			int news = accept((int)event[i].ident, &client_addr,
-			    &client_addr_len);
+			int fd, news;
+
+#ifdef __FreeBSD__
+			fd = (int)event[i].ident;
+#elif __sun
+			if (pe[i].portev_source != PORT_SOURCE_FD)
+				continue;
+
+			fd = (int)pe[i].portev_object;
+#endif
+
+			news = accept(fd, &client_addr, &client_addr_len);
 
 			if (news < 0) {
 				L9P_LOG(L9P_WARNING, "accept(): %s",
@@ -232,7 +256,7 @@ fail:
 	free(event);
 #endif
 
-	return (-1)
+	return (-1);
 }
 
 void
