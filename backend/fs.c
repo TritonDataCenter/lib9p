@@ -106,6 +106,14 @@ struct fs_fid {
 	struct l9p_acl *ff_acl; /* cached ACL if any */
 };
 
+#ifdef __sun
+# define	STATFS_FSID(_s) ((_s)->f_fsid)
+# define	statfs statvfs
+#else
+# define	STATFS_FSID(_s) \
+	(((uint64_t)(_s)->f_fsid.val[0] << 32) | (uint64_t)(_s)->f_fsid.val[1])
+#endif
+
 #define	FF_NO_NFSV4_ACL	0x01	/* don't go looking for NFSv4 ACLs */
 /*	FF_NO_POSIX_ACL	0x02	-- not yet */
 
@@ -684,13 +692,8 @@ dostat(struct fs_softc *sc, struct l9p_stat *s, char *name,
 	}
 }
 
-#ifdef __sun
-static void
-dostatfs(struct l9p_statfs *out, struct statvfs *in, long namelen)
-#else
 static void
 dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
-#endif
 {
 
 	out->type = L9P_FSTYPE;
@@ -701,12 +704,7 @@ dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
 	out->files = in->f_files;
 	out->ffree = in->f_ffree;
 	out->namelen = (uint32_t)namelen;
-#ifdef __sun
-	out->fsid = in->f_fsid;
-#else
-	out->fsid = ((uint64_t)in->f_fsid.val[0] << 32) |
-	    (uint64_t)in->f_fsid.val[1];
-#endif
+	out->fsid = STATFS_FSID(in);
 }
 
 static void

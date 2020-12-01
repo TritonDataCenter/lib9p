@@ -46,6 +46,10 @@
 #include "fcall.h"
 #include "linux_errno.h"
 
+#ifdef __sun
+#include <sys/sysmacros.h>
+#endif
+
 #ifdef __APPLE__
   #define GETGROUPS_GROUP_TYPE_IS_INT
 #endif
@@ -202,9 +206,9 @@ l9p_getgrlist(const char *name, gid_t basegid, int *angroups)
 	 * For now just use NGROUPS_MAX.
 	 */
 	ngroups = NGROUPS_MAX;
-	groups = malloc((size_t)ngroups * sizeof(*groups));
+	groups = calloc((size_t)ngroups, sizeof (*groups));
 #ifdef GETGROUPS_GROUP_TYPE_IS_INT
-	int_groups = groups ? malloc((size_t)ngroups * sizeof(*int_groups)) :
+	int_groups = groups ? calloc((size_t)ngroups, sizeof (*int_groups)) :
 	    NULL;
 	if (int_groups == NULL) {
 		free(groups);
@@ -216,11 +220,19 @@ l9p_getgrlist(const char *name, gid_t basegid, int *angroups)
 		return (NULL);
 	}
 #ifdef GETGROUPS_GROUP_TYPE_IS_INT
-	(void) getgrouplist(name, (int)basegid, int_groups, &ngroups);
+	if (getgrouplist(name, (int)basegid, int_groups, &ngroups) < 0) {
+		free(groups);
+		free(int_groups);
+		return (NULL);
+	}
 	for (i = 0; i < ngroups; i++)
 		groups[i] = (gid_t)int_groups[i];
+	free(int_groups);
 #else
-	(void) getgrouplist(name, basegid, groups, &ngroups);
+	if (getgrouplist(name, basegid, groups, &ngroups) < 0) {
+		free(groups);
+		return (NULL);
+	}
 #endif
 	*angroups = ngroups;
 	return (groups);
@@ -403,6 +415,106 @@ l9p_describe_name(const char *str, char *name, struct sbuf *sb)
 	else
 		sbuf_printf(sb, "%s\"%.*s\"", str, (int)len, name);
 }
+
+#ifdef __sun
+void
+strmode(mode_t mode, char *bp)
+{
+	/*
+	 * Some of these file types are likely not possible with 9pfs, but
+	 * instead of trying to exhaustively determine which ones are or
+	 * aren't, we translate the whole lot of them.
+	 */
+	switch (mode & S_IFMT) {
+	case S_IFDIR:
+		*bp++ = 'd';
+		break;
+	case S_IFBLK:
+		*bp++ = 'b';
+		break;
+	case S_IFCHR:
+		*bp++ = 'c';
+		break;
+	case S_IFIFO:
+		*bp++ = 'p';
+		break;
+	case S_IFSOCK:
+		*bp++ = 's';
+		break;
+	case S_IFLNK:
+		*bp++ = 'l';
+		break;
+	case S_IFDOOR:
+		*bp++ = 'D';
+		break;
+	case S_IFREG:
+		*bp++ = '-';
+		break;
+	case S_IFPORT:
+		*bp++ = 'P';
+		break;
+	default:
+		*bp++ = '?';
+		break;
+	}
+
+#define	ONE(_cmp, _ch) ((mode & (_cmp)) != 0) ? _ch : '-'
+	*bp++ = ONE(S_IRUSR, 'r');
+	*bp++ = ONE(S_IWUSR, 'w');
+	switch (mode & S_ISUID|S_IXUSR) {
+	case S_ISUID|S_IXUSR:
+		*bp++ = 's';
+		break;
+	case S_ISUID:
+		*bp++ = 'S';
+		break;
+	case S_IXUSR:
+		*bp++ = 'x';
+		break;
+	case 0:
+		*bp++ = '-';
+	}
+
+	*bp++ = ONE(S_IRGRP, 'r');
+	*bp++ = ONE(S_IWGRP, 'w');
+	switch (mode & S_ISGID|S_IXGRP|S_IFREG) {
+	case S_ISGID|S_IXGRP:
+		*bp++ = 's';
+		break;
+	case S_ISGID|S_IFREG:
+		*bp++ = 'L';
+		break;
+	case S_ISGID:
+		*bp++ = 'S';
+		break;
+	case S_IXGRP:
+		*bp++ = 'x';
+		break;
+	default:
+		*bp++ = '-';
+	}
+
+	*bp++ = ONE(S_IROTH, 'r');
+	*bp++ = ONE(S_IWOTH, 'w');
+	switch (mode & S_ISVTX|S_IXOTH) {
+	case S_ISVTX|S_IXOTH:
+		*bp++ = 't';
+		break;
+	case S_ISVTX:
+		*bp++ = 'T';
+		break;
+	case S_IXOTH:
+		*bp++ = 'x';
+		break;
+	default:
+		*bp++ = '-';
+	}
+
+	*bp++ = ' ';
+	*bp = '\0';
+#undef ONE
+}
+#endif
 
 /*
  * Show permissions (rwx etc).  Prints the value in hex only if

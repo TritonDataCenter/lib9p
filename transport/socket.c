@@ -112,8 +112,8 @@ l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 		sockets[i] = -1;
 
 #ifdef __sun
-	pev = calloc(nsockets, sizeof (port_event_t));
-	if (pev == NULL) {
+	pe = calloc(nsockets, sizeof (port_event_t));
+	if (pe == NULL) {
 		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
 		goto fail;
 	}
