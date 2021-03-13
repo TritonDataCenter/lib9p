@@ -108,7 +108,6 @@ struct fs_fid {
 
 #ifdef __sun
 # define	STATFS_FSID(_s) ((_s)->f_fsid)
-# define	statfs statvfs
 #else
 # define	STATFS_FSID(_s) \
 	(((uint64_t)(_s)->f_fsid.val[0] << 32) | (uint64_t)(_s)->f_fsid.val[1])
@@ -692,8 +691,13 @@ dostat(struct fs_softc *sc, struct l9p_stat *s, char *name,
 	}
 }
 
+#ifndef __sun
 static void
 dostatfs(struct l9p_statfs *out, struct statfs *in, long namelen)
+#else
+static void
+dostatfs(struct l9p_statfs *out, struct statvfs *in, long namelen)
+#endif
 {
 
 	out->type = L9P_FSTYPE;
@@ -1488,12 +1492,12 @@ fs_imksocket(void *softc, struct l9p_fid *dir, char *name,
     bool isp9, mode_t perm, gid_t egid, struct stat *st)
 {
 	struct fs_fid *ff;
-	struct sockaddr_un sun;
+	struct sockaddr_un un;
 	char *path;
 	char newname[MAXPATHLEN];
 	gid_t gid;
 	uid_t uid;
-	int error = 0, s, fd;
+	int error = 0, s, fd, slen;
 
 	ff = dir->lo_aux;
 	error = fs_buildname(dir, name, newname, sizeof(newname));
@@ -1515,7 +1519,7 @@ fs_imksocket(void *softc, struct l9p_fid *dir, char *name,
 	fd = -1;
 #ifdef HAVE_BINDAT
 	/* Try bindat() if needed. */
-	if (strlen(path) >= sizeof(sun.sun_path)) {
+	if (strlen(path) >= sizeof(un.sun_path)) {
 		fd = openat(ff->ff_dirfd, ff->ff_name,
 		    O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 		if (fd >= 0)
@@ -1533,23 +1537,28 @@ fs_imksocket(void *softc, struct l9p_fid *dir, char *name,
 	 * Unix-like system, this was known to behave oddly,
 	 * so we test for ">=" rather than just ">".
 	 */
-	if (strlen(path) >= sizeof(sun.sun_path)) {
+	if (strlen(path) >= sizeof(un.sun_path)) {
 		error = ENAMETOOLONG;
 		goto out;
 	}
-	sun.sun_family = AF_UNIX;
-	sun.sun_len = sizeof(struct sockaddr_un);
-	strncpy(sun.sun_path, path, sizeof(sun.sun_path));
+	un.sun_family = AF_UNIX;
+#ifndef __sun
+	slen = un.sun_len = sizeof(struct sockaddr_un);
+#else
+	slen = SUN_LEN(&un);
+#endif
+
+	strncpy(un.sun_path, path, sizeof(un.sun_path));
 
 #ifdef HAVE_BINDAT
 	if (fd >= 0) {
-		if (bindat(fd, s, (struct sockaddr *)&sun, sun.sun_len) < 0)
+		if (bindat(fd, s, (struct sockaddr *)&un, slen) < 0)
 			error = errno;
 		goto out;	/* done now, for good or ill */
 	}
 #endif
 
-	if (bind(s, (struct sockaddr *)&sun, sun.sun_len) < 0)
+	if (bind(s, (struct sockaddr *)&un, slen) < 0)
 		error = errno;
 out:
 
@@ -2548,10 +2557,12 @@ fs_getattr(void *softc __unused, struct l9p_request *req)
 		req->lr_resp.rgetattr.blocks = (uint64_t)st.st_blocks;
 		valid |= L9PL_GETATTR_BLOCKS;
 	}
+#ifndef __sun
 	if (mask & L9PL_GETATTR_GEN) {
 		req->lr_resp.rgetattr.gen = st.st_gen;
 		valid |= L9PL_GETATTR_GEN;
 	}
+#endif
 	/* don't know what to do with data version yet */
 
 	generate_qid(&st, &req->lr_resp.rgetattr.qid);
