@@ -31,4 +31,4 @@ lib9p.so.1: $(OBJS)
 	$(CC) -o lib9p.so.1 -shared -Wl,-Bdirect -hlib9p.so.1 $(OBJS)
 
 clean:
-	-rm -f $(OBJS) lib9p.so
+	-rm -f $(OBJS) lib9p.so.1

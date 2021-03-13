@@ -308,7 +308,7 @@ struct l9p_acl *l9p_freebsd_nfsv4acl_to_acl(acl_t acl);
 #endif
 
 #if defined(HAVE_ILLUMOS_ACLS)
-struct l9p_acl *l9p_illumos_nfs4vacl_to_acl(ace_t acl);
+struct l9p_acl *l9p_illumos_nfsv4acl_to_acl(acl_t *acl);
 #endif
 
 #if defined(HAVE_POSIX_ACLS) && 0 /* not yet */

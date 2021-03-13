@@ -180,6 +180,8 @@ static void dostat(struct fs_softc *, struct l9p_stat *, char *,
     struct stat *, bool dotu);
 #ifdef __sun
 static void dostatfs(struct l9p_statfs *, struct statvfs *, long);
+#define	ACL_TYPE_NFS4 1
+acl_t *acl_get_fd_np(int fd, int type);
 #else
 static void dostatfs(struct l9p_statfs *, struct statfs *, long);
 #endif
@@ -815,6 +817,9 @@ look_for_nfsv4_acl(struct fs_fid *ff, int fd, const char *path)
 #if defined(HAVE_FREEBSD_ACLS)
 	acl = l9p_freebsd_nfsv4acl_to_acl(sysacl);
 	acl = NULL; /* XXX need a l9p_darwin_acl_to_acl */
+#elif defined(HAVE_ILLUMOS_ACLS)
+	acl = l9p_illumos_nfsv4acl_to_acl(sysacl);
+	acl = NULL;
 #endif
 	acl_free(sysacl);
 
@@ -3137,3 +3142,22 @@ l9p_backend_fs_init(struct l9p_backend **backendp, int rootfd, bool ro)
 	*backendp = backend;
 	return (0);
 }
+
+#ifdef __sun
+acl_t *
+acl_get_fd_np(int fd, int type)
+{
+	acl_t *acl;
+	int flag, ret;
+
+	flag = 0;
+	if (type == ACL_TYPE_NFS4)
+		flag = ACL_NO_TRIVIAL;
+
+	ret = facl_get(fd, flag, &acl);
+	if (ret != 0)
+		return (NULL);
+
+	return (acl);
+}
+#endif
