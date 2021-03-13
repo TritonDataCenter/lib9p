@@ -23,7 +23,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
- * Copyright 2020 Joyent, Inc.
+ * Copyright 2021 Joyent, Inc.
  */
 
 #include <stdlib.h>
@@ -61,6 +61,28 @@ struct l9p_socket_softc
 	int ls_fd;
 };
 
+#ifdef __FreeBSD__
+struct event_svr {
+	struct kevent *ev_kev;
+	struct kevent *ev_event;
+	int ev_kq;
+};
+#elif __sun
+struct event_svr {
+	port_event_t *ev_pe;
+	int ev_port;
+};
+#else
+#error "No event server defined"
+#endif
+
+static int l9p_init_event_svr(struct event_svr *, uint_t);
+static uint_t l9p_get_server_addrs(const char *, const char *,
+    struct addrinfo **);
+static uint_t l9p_bind_addrs(struct event_svr *, struct addrinfo *, uint_t,
+    int **);
+static int l9p_event_get(struct l9p_server *, struct event_svr *, uint_t,
+    void (*cb)(struct l9p_server *, int));
 static int l9p_socket_readmsg(struct l9p_socket_softc *, void **, size_t *);
 static int l9p_socket_get_response_buffer(struct l9p_request *,
     struct iovec *, size_t *, void *);
@@ -75,202 +97,293 @@ static ssize_t xwrite(int, void *, size_t);
 int
 l9p_start_server(struct l9p_server *server, const char *host, const char *port)
 {
-	struct addrinfo *res, *res0, hints;
-#ifdef __sun
-	port_event_t *pe = NULL;
-	int evport;
-	uint_t evs;
-#else
-	struct kevent *kev = NULL;
-	struct kevent *event = NULL;
-	int kq, evs;
-#endif
-	int err, i, val;
-	int nsockets = 0;
+	struct addrinfo *res = NULL;
 	int *sockets = NULL;
+	uint_t naddrs = 0;
+	uint_t nsockets = 0;
+	uint_t i;
+	struct event_svr esvr;
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = PF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	err = getaddrinfo(host, port, &hints, &res0);
-
-	if (err)
+	naddrs = l9p_get_server_addrs(host, port, &res);
+	if (naddrs == 0)
 		return (-1);
 
-	for (res = res0; res != NULL; res = res->ai_next)
-		nsockets++;
+	if (l9p_init_event_svr(&esvr, naddrs) != 0) {
+		freeaddrinfo(res);
+		return (-1);
+	}
+
+	nsockets = l9p_bind_addrs(&esvr, res, naddrs, &sockets);
+
+	/*
+	 * We don't need res, after this, so free it and NULL it to prevent
+	 * any possible use after free.
+	 */
+	freeaddrinfo(res);
+	res = NULL;
 
 	if (nsockets == 0)
-		return (-1);
-
-	sockets = calloc(nsockets, sizeof (int));
-	if (sockets == NULL) {
-		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
-		return (-1);
-	}
-
-	for (i = 0; i < nsockets; i++)
-		sockets[i] = -1;
-
-#ifdef __sun
-	pe = calloc(nsockets, sizeof (port_event_t));
-	if (pe == NULL) {
-		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
 		goto fail;
-	}
-
-	evport = port_create();
-	if (evport == -1) {
-		L9P_LOG(L9P_ERROR, "port_create(): %s", strerror(errno));
-		goto fail;
-	}
-#else
-	kev = calloc(nsockets, sizeof (struct kevent));
-	if (kev == NULL) {
-		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
-		goto fail;
-	}
-
-	event = calloc(nsockets, sizeof (struct kevent));
-	if (event == NULL) {
-		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
-		goto fail;
-	}
-
-	kq = kqueue();
-#endif
-
-	for (i = 0, res = res0; res; res = res->ai_next) {
-		int s = socket(res->ai_family, res->ai_socktype,
-		    res->ai_protocol);
-
-		val = 1;
-		setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
-
-		if (s < 0)
-			continue;
-
-		if (bind(s, res->ai_addr, res->ai_addrlen) < 0) {
-			close(s);
-			continue;
-		}
-
-		sockets[i] = s;
-#ifdef __sun
-
-		if (port_associate(evport, PORT_SOURCE_FD, s, POLLIN|POLLHUP,
-		    NULL) < 0) {
-			L9P_LOG(L9P_ERROR, "port_associate(%d): %s", s,
-			    strerror(errno));
-			goto fail;
-		}
-#else
-		EV_SET(&kev[i++], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0,
-		    0, 0);
-#endif
-		listen(s, 10);
-	}
-
-	if (i < 1) {
-		L9P_LOG(L9P_ERROR, "bind(): %s", strerror(errno));
-
-		return(-1);
-	}
-
-	/* set nsockets to the actual number bound */
-	nsockets = i;
-
-#ifdef __FreeBSD__
-	if (kevent(kq, kev, nsockets, NULL, 0, NULL) < 0) {
-		L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
-		return (-1);
-	}
-#endif
 
 	for (;;) {
-#ifdef __FreeBSD__
-		evs = kevent(kq, NULL, 0, event, nsockets, NULL);
-		if (evs < 0) {
-			if (errno == EINTR)
-				continue;
-
-			L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
-			return (-1);
-		}
-#elif defined(__sun)
-		evs = 1;
-		if (port_getn(evport, pe, nsockets, &evs, NULL) < 0) {
-			if (errno == EINTR)
-				continue;
-
-			L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
-			return (-1);
-		}
-#endif
-
-		for (i = 0; i < evs; i++) {
-			struct sockaddr client_addr;
-			socklen_t client_addr_len = sizeof(client_addr);
-			int fd, news;
-
-#ifdef __FreeBSD__
-			fd = (int)event[i].ident;
-#elif __sun
-			if (pe[i].portev_source != PORT_SOURCE_FD)
-				continue;
-
-			fd = (int)pe[i].portev_object;
-#endif
-
-			news = accept(fd, &client_addr, &client_addr_len);
-
-			if (news < 0) {
-				L9P_LOG(L9P_WARNING, "accept(): %s",
-				    strerror(errno));
-				continue;
-			}
-
-			l9p_socket_accept(server, news, &client_addr,
-			    client_addr_len);
-		}
+		if (l9p_event_get(server, &esvr, nsockets,
+		    l9p_socket_accept) < 0)
+			break;
 	}
 
-	return (0);
+	/* We get here if something failed */
+	for (i = 0; i < nsockets; i++)
+		close(i);
 
 fail:
-	if (sockets != NULL) {
-		for (i = 0; i < nsockets; i++) {
-			if (sockets[i] >= 0)
-				(void) close(sockets[i]);
-		}
-		free(sockets);
-	}
+	free(sockets);
 
-#ifdef __sun
-	if (evport >= 0)
-		close(evport);
-
-	free(pe);
+#ifdef __FreeBSD__
+	close(esvr.ev_kq);
+	free(esvr.ev_kev);
+	free(esvr.ev_event);
+#elif __sun
+	close(esvr.ev_port);
+	free(esvr.ev_pe);
 #else
-	free(kev);
-	free(event);
+#error "Port me"
 #endif
 
 	return (-1);
 }
 
+static uint_t
+l9p_get_server_addrs(const char *host, const char *port, struct addrinfo **resp)
+{
+	struct addrinfo *res, hints;
+	uint_t naddrs;
+	int rc;
+
+	memset(&hints, 0, sizeof (hints));
+	hints.ai_family = PF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	rc = getaddrinfo(host, port, &hints, resp);
+	if (rc > 0) {
+		L9P_LOG(L9P_ERROR, "getaddrinfo(): %s", gai_strerror(rc));
+		return (0);
+	}
+
+	naddrs = 0;
+	for (res = *resp; res != NULL; res = res->ai_next)
+		naddrs++;
+
+	if (naddrs == 0)
+		L9P_LOG(L9P_ERROR, "no addresses found for %s:%s", host, port);
+
+	return (naddrs);
+}
+
+#ifdef __FreeBSD__
+static int
+l9p_init_event_svr(struct event_svr *svr, uint_t nsockets)
+{
+	svr->ev_kev = calloc(nsockets, sizeof (struct kevent));
+	if (svr->ev_kev == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		return (-1);
+	}
+
+	svr->ev_event = calloc(nsockets, sizeof (struct kevent));
+	if (svr->ev_event == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		free(svr->ev_key);
+		svr->ev_key = NULL;
+		return (-1);
+	}
+
+	svr->ev_kq = kqueue();
+	if (svr->ev_kq == -1) {
+		L9P_LOG(L9P_ERROR, "kqueue(): %s", strerror(errno));
+		free(svr->ev_kev);
+		free(svr->ev_event);
+		svr->ev_kev = NULL;
+		svr->ev_event = NULL;
+		return (-1);
+	}
+	
+	return (0);
+}
+#elif __sun
+static int
+l9p_init_event_svr(struct event_svr *svr, uint_t nsockets)
+{
+	svr->ev_pe = calloc(nsockets, sizeof (port_event_t));
+	if (svr->ev_pe == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		return (-1);
+	}
+
+	svr->ev_port = port_create();
+	if (svr->ev_port == -1) {
+		L9P_LOG(L9P_ERROR, "port_create(): %s", strerror(errno));
+		return (-1);
+	}
+
+	return (0);
+}
+#else
+#error "No event server defined"
+#endif
+
+static uint_t
+l9p_bind_addrs(struct event_svr *svr, struct addrinfo *addrs, uint_t naddrs,
+    int **socketsp)
+{
+	struct addrinfo *addr;
+	uint_t i, j;
+
+	*socketsp = calloc(naddrs, sizeof (int));
+	if (*socketsp == NULL) {
+		L9P_LOG(L9P_ERROR, "calloc(): %s", strerror(errno));
+		return (0);
+	}
+
+	for (i = 0, addr = addrs; addr != NULL; addr = addr->ai_next) {
+		int s;
+		int val = 1;
+
+		s = socket(addr->ai_family, addr->ai_socktype,
+		    addr->ai_protocol);
+		if (s == -1) {
+			L9P_LOG(L9P_ERROR, "socket(): %s", strerror(errno));
+			continue;
+		}
+
+		if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &val,
+		    sizeof (val)) < 0) {
+			L9P_LOG(L9P_ERROR, "setsockopt(): %s", strerror(errno));
+			close(s);
+			continue;
+		}
+
+		if (bind(s, addr->ai_addr, addr->ai_addrlen) < 0) {
+			L9P_LOG(L9P_ERROR, "bind(): %s", strerror(errno));
+			close(s);
+			continue;
+		}
+
+		if (listen(s, 10) < 0) {
+			L9P_LOG(L9P_ERROR, "listen(): %s", strerror(errno));
+			close(s);
+			continue;
+		}
+
+#ifdef __FreeBSD__
+		EV_SET(&svr->ev_kev[i], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0,
+		    0, 0);
+#elif __sun
+		if (port_associate(svr->ev_port, PORT_SOURCE_FD, s,
+		    POLLIN|POLLHUP, NULL) < 0) {
+			L9P_LOG(L9P_ERROR, "port_associate(%d): %s", s,
+			    strerror(errno));
+			close(s);
+			continue;
+		}
+#else
+#error "Port me"
+#endif
+
+		*socketsp[i++] = s;
+	}
+
+	if (i < 1) {
+		free(*socketsp);
+		*socketsp = NULL;
+		return (0);
+	}
+
+	for (j = i; j < naddrs; j++)
+		*socketsp[j++] = -1;
+
+#ifdef __FreeBSD__
+	if (kevent(svr->ev_kq, svr->ev_kev, i, NULL, 0, NULL) < 0) {
+		L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
+
+		for (j = 0; j < i; j++)
+			close(j);
+
+		free(*socketsp);
+		*socketsp = NULL;
+
+		return (0);
+	}
+#endif
+
+	return (i);
+}
+
+#ifdef __FreeBSD__
+static int
+l9p_event_get(struct l9p_server *l9svr, struct event_svr *esvr, uint_t nsockets,
+    void (*cb)(struct l9p_server *, int))
+{
+	int i, evs;
+
+	evs = kevent(esvr->ev_kq, NULL, 0, esvr->ev_event, nsockets, NULL);
+	if (evs < 0) {
+		if (errno == EINTR)
+			return (0);
+		L9P_LOG(L9P_ERROR, "kevent(): %s", strerror(errno));
+		return (-1);
+	}
+
+	for (i = 0; i < evs; i++)
+		cb(l9svr, (int)sevr->ev_event[i].ident);
+
+	return (0);
+}
+#elif __sun
+static int
+l9p_event_get(struct l9p_server *l9svr, struct event_svr *esvr, uint_t nsockets,
+    void (*cb)(struct l9p_server *, int))
+{
+	uint_t evs = 1;
+	int i;
+
+	if (port_getn(esvr->ev_port, esvr->ev_pe, nsockets, &evs, NULL) < 0) {
+		if (errno == EINTR)
+			return (0);
+		L9P_LOG(L9P_ERROR, "port_getn(): %s", strerror(errno));
+		return (-1);
+	}
+
+	for (i = 0; i < evs; i++) {
+		if (esvr->ev_pe[i].portev_source != PORT_SOURCE_FD)
+			continue;
+
+		cb(l9svr, (int)esvr->ev_pe[i].portev_object);
+	}
+
+	return (0);
+}
+#else
+#error "Port me"
+#endif
+
 void
-l9p_socket_accept(struct l9p_server *server, int conn_fd,
-    struct sockaddr *client_addr, socklen_t client_addr_len)
+l9p_socket_accept(struct l9p_server *server, int svr_fd)
 {
 	struct l9p_socket_softc *sc;
 	struct l9p_connection *conn;
 	char host[NI_MAXHOST + 1];
 	char serv[NI_MAXSERV + 1];
-	int err;
+	struct sockaddr client_addr;
+	socklen_t client_addr_len = sizeof (client_addr);
+	int conn_fd, err;
 
-	err = getnameinfo(client_addr, client_addr_len, host, NI_MAXHOST, serv,
-	    NI_MAXSERV, NI_NUMERICHOST | NI_NUMERICSERV);
+	conn_fd = accept(svr_fd, &client_addr, &client_addr_len);
+	if (conn_fd < 0) {
+		L9P_LOG(L9P_WARNING, "accept(): %s", strerror(errno));
+		return;
+	}
+
+	err = getnameinfo(&client_addr, client_addr_len, host, NI_MAXHOST,
+	    serv, NI_MAXSERV, NI_NUMERICHOST | NI_NUMERICSERV);
 
 	if (err != 0) {
 		L9P_LOG(L9P_WARNING, "cannot look up client name: %s",

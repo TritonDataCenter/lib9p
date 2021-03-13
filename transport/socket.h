@@ -34,7 +34,6 @@
 
 int l9p_start_server(struct l9p_server *server, const char *host,
     const char *port);
-void l9p_socket_accept(struct l9p_server *server, int conn_fd,
-    struct sockaddr *client_addr, socklen_t client_addr_len);
+void l9p_socket_accept(struct l9p_server *server, int serv_fd);
 
 #endif /* LIB9P_SOCKET_H */
