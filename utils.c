@@ -48,6 +48,7 @@
 
 #ifdef __sun
 #include <sys/sysmacros.h>
+#include <grp.h>
 #endif
 
 #ifdef __APPLE__
