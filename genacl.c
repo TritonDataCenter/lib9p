@@ -756,7 +756,7 @@ l9p_illumos_nfsv4acl_to_acl(acl_t *sysacl)
 		return (NULL);
 
 	l9acl = l9p_new_acl(L9P_ACLTYPE_NFSv4, sysacl->acl_cnt);
-	if (acl == NULL)
+	if (l9acl == NULL)
 		return (NULL);
 
 	ent = sysacl->acl_aclp;

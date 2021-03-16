@@ -922,9 +922,10 @@ fs_attach(void *softc, struct l9p_request *req)
 	if (n_uname != L9P_NONUNAME) {
 		uid = (uid_t)n_uname;
 		pwd = fs_getpwuid(sc, uid, &udata);
-		if (pwd == NULL)
+		if (pwd == NULL) {
 			L9P_LOG(L9P_DEBUG,
 			    "Tattach: uid %ld: no such user", (long)uid);
+		}
 	} else {
 		uid = (uid_t)-1;
 #if defined(WITH_CASPER)
@@ -932,10 +933,11 @@ fs_attach(void *softc, struct l9p_request *req)
 #else
 		pwd = getpwnam(req->lr_req.tattach.uname);
 #endif
-		if (pwd == NULL)
+		if (pwd == NULL) {
 			L9P_LOG(L9P_DEBUG,
 			    "Tattach: %s: no such user",
 			    req->lr_req.tattach.uname);
+		}
 	}
 
 	/*

@@ -35,7 +35,7 @@
 #include <sys/types.h>
 #ifdef __APPLE__
 # include "../apple_endian.h"
-#elif __sun__
+#elif __sun
 # include <port.h>
 # include "../illumos_endian.h"
 #else
@@ -172,8 +172,9 @@ l9p_get_server_addrs(const char *host, const char *port, struct addrinfo **resp)
 	for (res = *resp; res != NULL; res = res->ai_next)
 		naddrs++;
 
-	if (naddrs == 0)
+	if (naddrs == 0) {
 		L9P_LOG(L9P_ERROR, "no addresses found for %s:%s", host, port);
+	}
 
 	return (naddrs);
 }
@@ -463,12 +464,13 @@ l9p_socket_readmsg(struct l9p_socket_softc *sc, void **buf, size_t *size)
 	}
 
 	if (ret != sizeof(uint32_t)) {
-		if (ret == 0)
+		if (ret == 0) {
 			L9P_LOG(L9P_DEBUG, "%p: EOF", (void *)sc->ls_conn);
-		else
+		} else {
 			L9P_LOG(L9P_ERROR,
 			    "short read: %zd bytes of %zd expected",
 			    ret, sizeof(uint32_t));
+		}
 		return (-1);
 	}
 
