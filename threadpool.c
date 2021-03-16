@@ -276,7 +276,7 @@ l9p_threadpool_tflush(struct l9p_request *req)
 	struct l9p_threadpool *tp;
 	struct l9p_request *flushee;
 	uint16_t oldtag;
-	enum l9p_flushstate nstate;
+	enum l9p_flushstate nstate = L9P_WS_NOTSTARTED;
 
 	/*
 	 * Find what we're supposed to flush (the flushee, as it were).
