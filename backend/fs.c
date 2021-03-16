@@ -23,6 +23,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
+ * Copyright 2021 Joyent, Inc.
  */
 
 /*
@@ -84,11 +85,22 @@
   #include <sys/sysmacros.h>
   #include <sys/statvfs.h>
   #include <sys/un.h>
+  #include <attr.h>
+  #include <sys/nvpair.h>
 #endif
 
 struct fs_softc {
 	int 	fs_rootfd;
 	bool	fs_readonly;
+#if defined(__sun)
+	/*
+	 * On illumos, the file creation time (birthtime) is stored (on
+	 * supported filesystems -- i.e. zfs) in an extended attribute.
+	 * If for some reason the fs doesn't support extended attributes,
+	 * we skip trying to read the creation time.
+	 */
+	bool	fs_hasxattr;
+#endif
 #if defined(WITH_CASPER)
 	cap_channel_t *fs_cappwd;
 	cap_channel_t *fs_capgrp;
@@ -106,11 +118,21 @@ struct fs_fid {
 	struct l9p_acl *ff_acl; /* cached ACL if any */
 };
 
-#ifdef __sun
-# define	STATFS_FSID(_s) ((_s)->f_fsid)
-#else
+#if defined(__FreeBSD__)
 # define	STATFS_FSID(_s) \
 	(((uint64_t)(_s)->f_fsid.val[0] << 32) | (uint64_t)(_s)->f_fsid.val[1])
+
+# define	STAT_ATIME(_s)	((_s)->st_atimespec)
+# define	STAT_MTIME(_s)	((_s)->st_mtimespec)
+# define	STAT_CTIME(_s)	((_s)->st_ctimespec)
+#elif defined (__sun)
+# define	STATFS_FSID(_s)	((_s)->f_fsid)
+
+# define	STAT_ATIME(_s)	((_s)->st_atim)
+# define	STAT_MTIME(_s)	((_s)->st_mtim)
+# define	STAT_CTIME(_s)	((_s)->st_ctim)
+#else
+#error "Port me"
 #endif
 
 #define	FF_NO_NFSV4_ACL	0x01	/* don't go looking for NFSv4 ACLs */
@@ -179,6 +201,8 @@ static struct fs_fid *open_fid(int, const char *, struct fs_authinfo *, bool);
 static void dostat(struct fs_softc *, struct l9p_stat *, char *,
     struct stat *, bool dotu);
 #ifdef __sun
+static void getcrtime(struct fs_softc *, int, const char *, uint64_t *,
+    uint64_t *);
 static void dostatfs(struct l9p_statfs *, struct statvfs *, long);
 #define	ACL_TYPE_NFS4 1
 acl_t *acl_get_fd_np(int fd, int type);
@@ -1735,7 +1759,7 @@ fs_read(void *softc, struct l9p_request *req)
 		size_t niov = l9p_truncate_iov(req->lr_data_iov,
                     req->lr_data_niov, req->lr_req.io.count);
 
-#if defined(__FreeBSD__)
+#if defined(__FreeBSD__) || defined(__sun)
 		ret = preadv(file->ff_fd, req->lr_data_iov, niov,
 		    req->lr_req.io.offset);
 #else
@@ -2494,57 +2518,37 @@ fs_getattr(void *softc __unused, struct l9p_request *req)
 		req->lr_resp.rgetattr.rdev = (uint64_t)st.st_rdev;
 		valid |= L9PL_GETATTR_RDEV;
 	}
-#ifdef __sun
 	if (mask & L9PL_GETATTR_ATIME) {
 		req->lr_resp.rgetattr.atime_sec =
-		    (uint64_t)st.st_atim.tv_sec;
+		    (uint64_t)STAT_ATIME(&st).tv_sec;
 		req->lr_resp.rgetattr.atime_nsec =
-		    (uint64_t)st.st_atim.tv_nsec;
+		    (uint64_t)STAT_ATIME(&st).tv_nsec;
 		valid |= L9PL_GETATTR_ATIME;
 	}
 	if (mask & L9PL_GETATTR_MTIME) {
 		req->lr_resp.rgetattr.mtime_sec =
-		    (uint64_t)st.st_mtim.tv_sec;
+		    (uint64_t)STAT_MTIME(&st).tv_sec;
 		req->lr_resp.rgetattr.mtime_nsec =
-		    (uint64_t)st.st_mtim.tv_nsec;
+		    (uint64_t)STAT_MTIME(&st).tv_nsec;
 		valid |= L9PL_GETATTR_MTIME;
 	}
 	if (mask & L9PL_GETATTR_CTIME) {
 		req->lr_resp.rgetattr.ctime_sec =
-		    (uint64_t)st.st_ctim.tv_sec;
+		    (uint64_t)STAT_CTIME(&st).tv_sec;
 		req->lr_resp.rgetattr.ctime_nsec =
-		    (uint64_t)st.st_ctim.tv_nsec;
+		    (uint64_t)STAT_CTIME(&st).tv_nsec;
 		valid |= L9PL_GETATTR_CTIME;
 	}
-#else
-	if (mask & L9PL_GETATTR_ATIME) {
-		req->lr_resp.rgetattr.atime_sec =
-		    (uint64_t)st.st_atimespec.tv_sec;
-		req->lr_resp.rgetattr.atime_nsec =
-		    (uint64_t)st.st_atimespec.tv_nsec;
-		valid |= L9PL_GETATTR_ATIME;
-	}
-	if (mask & L9PL_GETATTR_MTIME) {
-		req->lr_resp.rgetattr.mtime_sec =
-		    (uint64_t)st.st_mtimespec.tv_sec;
-		req->lr_resp.rgetattr.mtime_nsec =
-		    (uint64_t)st.st_mtimespec.tv_nsec;
-		valid |= L9PL_GETATTR_MTIME;
-	}
-	if (mask & L9PL_GETATTR_CTIME) {
-		req->lr_resp.rgetattr.ctime_sec =
-		    (uint64_t)st.st_ctimespec.tv_sec;
-		req->lr_resp.rgetattr.ctime_nsec =
-		    (uint64_t)st.st_ctimespec.tv_nsec;
-		valid |= L9PL_GETATTR_CTIME;
-	}
-#endif
 	if (mask & L9PL_GETATTR_BTIME) {
 #if defined(HAVE_BIRTHTIME)
 		req->lr_resp.rgetattr.btime_sec =
 		    (uint64_t)st.st_birthtim.tv_sec;
 		req->lr_resp.rgetattr.btime_nsec =
 		    (uint64_t)st.st_birthtim.tv_nsec;
+#elif defined(__sun)
+		getcrtime(softc, file->ff_dirfd, file->ff_name,
+		    &req->lr_resp.rgetattr.btime_sec,
+		    &req->lr_resp.rgetattr.btime_nsec);
 #else
 		req->lr_resp.rgetattr.btime_sec = 0;
 		req->lr_resp.rgetattr.btime_nsec = 0;
@@ -3117,6 +3121,11 @@ l9p_backend_fs_init(struct l9p_backend **backendp, int rootfd, bool ro)
 	sc->fs_readonly = ro;
 	backend->softc = sc;
 
+#if defined(__sun)
+	if (fpathconf(rootfd, _PC_XATTR_ENABLED) > 0)
+		sc->fs_hasxattr = 1;
+#endif
+
 #if defined(WITH_CASPER)
 	capcas = cap_init();
 	if (capcas == NULL)
@@ -3133,7 +3142,7 @@ l9p_backend_fs_init(struct l9p_backend **backendp, int rootfd, bool ro)
 	cap_setpassent(sc->fs_cappwd, 1);
 	cap_setgroupent(sc->fs_capgrp, 1);
 	cap_close(capcas);
-#elif __sun
+#elif defined(__sun)
 	setpwent();
 #else
 	setpassent(1);
@@ -3159,5 +3168,36 @@ acl_get_fd_np(int fd, int type)
 		return (NULL);
 
 	return (acl);
+}
+
+static void
+getcrtime(struct fs_softc *sc, int dirfd, const char *fname, uint64_t *secp,
+    uint64_t *nsp)
+{
+	nvlist_t *nvl = NULL;
+	uint64_t *vals = NULL;
+	uint_t nvals = 0;
+	int error;
+
+	*secp = 0;
+	*nsp = 0;
+
+	if (!sc->fs_hasxattr)
+		return;
+
+	if ((error = getattrat(dirfd, XATTR_VIEW_READWRITE, fname, &nvl)) != 0)
+		return;
+
+	if (nvlist_lookup_uint64_array(nvl, "crtime", &vals, &nvals) != 0)
+		goto done;
+
+	if (nvals != 2)
+		goto done;
+
+	*secp = vals[0];
+	*nsp = vals[1];
+
+done:
+	nvlist_free(nvl);
 }
 #endif
